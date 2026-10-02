@@ -36,9 +36,7 @@ export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 MANAGED_TAG='unified-vpn-installer-v1'
 STATE_DIR=/var/lib/unified-vpn-installer
 NODE_IMAGE=remnawave/node:2.8.0
-CADDY_VERSION=v2.11.4
-CADDY_BUILDER='caddy:2.11.4-builder@sha256:369218c81ca6d6af249981221b3a5c764d886dd5b058f51d144066de13f2418d'
-GCORE_MODULE='github.com/caddy-dns/gcore@v0.0.0-20250618083722-4ebfce0e46b0'
+MIN_GO_VERSION=1.25
 REMNA_COMMIT=55495e9783b8388a48e6580ff4c2c26a3eafa08f
 LOG='' TMP_DIR='' BACKUP_DIR='' STAGE='Проверки' PSIPHON_BIND='' UI_FD=2
 GCORE_TOKEN='' NODE_TOKEN='' SNI_DOMAIN=''
@@ -307,15 +305,43 @@ $SNI_DOMAIN:8443 {
 EOF
 }
 
+install_host_go() {
+    local current_go='' latest_go archive
+    if command -v go >/dev/null 2>&1; then
+        current_go="$(go env GOVERSION | sed 's/^go//')"
+    fi
+    if [[ -n "$current_go" ]] && dpkg --compare-versions "$current_go" ge "$MIN_GO_VERSION"; then
+        note "Использую установленный Go $current_go."
+        return
+    fi
+    note 'Устанавливаю актуальный Go на сервере.'
+    latest_go="$(curl --fail --silent --show-error --location --proto '=https' \
+        --proto-redir '=https' 'https://go.dev/VERSION?m=text' | sed -n '1p')"
+    [[ "$latest_go" =~ ^go[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || fail 'Не удалось определить версию Go.'
+    archive="${latest_go}.linux-${ARCH}.tar.gz"
+    curl --fail --progress-bar --show-error --location --retry 3 --connect-timeout 15 \
+        --max-time 900 --proto '=https' --proto-redir '=https' \
+        "https://go.dev/dl/$archive" -o "$TMP_DIR/$archive"
+    rm -rf -- /usr/local/go
+    run tar -C /usr/local -xzf "$TMP_DIR/$archive"
+    export PATH="/usr/local/go/bin:$PATH"
+    current_go="$(go env GOVERSION | sed 's/^go//')"
+    dpkg --compare-versions "$current_go" ge "$MIN_GO_VERSION" || \
+        fail "Установленный Go $current_go ниже требуемой версии $MIN_GO_VERSION."
+    note "Установлен Go $current_go."
+}
+
 install_caddy() {
-    note 'Сборка Caddy с Gcore в отдельном контейнере; это может занять несколько минут.'
-    install -d -m 0700 "$TMP_DIR/caddy-build"
-    run docker pull "$CADDY_BUILDER"
-    run docker run --rm \
-        -e CGO_ENABLED=0 -e XCADDY_SETCAP=0 -e GODEBUG=goindex=0 \
-        -e GOMAXPROCS=2 -e GOFLAGS=-p=2 \
-        -v "$TMP_DIR/caddy-build:/out" "$CADDY_BUILDER" \
-        xcaddy build "$CADDY_VERSION" --with "$GCORE_MODULE" --output /out/caddy
+    note 'Собираю Caddy с Gcore прямо на сервере через Go и xcaddy; это может занять несколько минут.'
+    run apt-get -o DPkg::Lock::Timeout=180 -o Dpkg::Options::=--force-confold install -y \
+        build-essential wget
+    install_host_go
+    install -d -m 0700 "$TMP_DIR/go-bin" "$TMP_DIR/caddy-build"
+    run env GOBIN="$TMP_DIR/go-bin" go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+    (
+        cd "$TMP_DIR/caddy-build"
+        run "$TMP_DIR/go-bin/xcaddy" build --with github.com/caddy-dns/gcore
+    )
     "$TMP_DIR/caddy-build/caddy" list-modules | grep -Fx dns.providers.gcore >/dev/null \
         || fail 'В собранном Caddy нет модуля dns.providers.gcore.'
 
@@ -339,12 +365,12 @@ install_caddy() {
     run "$TMP_DIR/caddy-build/caddy" fmt --overwrite "$TMP_DIR/Caddyfile"
     run "$TMP_DIR/caddy-build/caddy" validate --adapter caddyfile \
         --envfile "$TMP_DIR/gcore.env" --config "$TMP_DIR/Caddyfile"
-    for file in /usr/local/bin/caddy /etc/caddy/Caddyfile /etc/caddy/gcore.env \
+    for file in /usr/bin/caddy /usr/local/bin/caddy /etc/caddy/Caddyfile /etc/caddy/gcore.env \
         /etc/systemd/system/caddy.service; do
         backup "$file"
     done
-    install -m 0755 "$TMP_DIR/caddy-build/caddy" /usr/local/bin/caddy.new
-    mv -f /usr/local/bin/caddy.new /usr/local/bin/caddy
+    install -m 0755 "$TMP_DIR/caddy-build/caddy" /usr/bin/caddy.new
+    mv -f /usr/bin/caddy.new /usr/bin/caddy
     install -o root -g caddy -m 0640 "$TMP_DIR/Caddyfile" /etc/caddy/Caddyfile
     install -o root -g root -m 0600 "$TMP_DIR/gcore.env" /etc/caddy/gcore.env
     cat > /etc/systemd/system/caddy.service <<'EOF'
@@ -360,8 +386,8 @@ Group=caddy
 EnvironmentFile=/etc/caddy/gcore.env
 Environment=XDG_DATA_HOME=/var/lib/caddy/.local/share
 Environment=XDG_CONFIG_HOME=/var/lib/caddy/.config
-ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
-ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --force
+ExecStart=/usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --force
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=10s
