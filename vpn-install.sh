@@ -139,6 +139,18 @@ valid_domain() {
     done
 }
 
+normalize_sni_domain() {
+    # Terminal paste can add CR, non-breaking spaces or zero-width marks.
+    SNI_DOMAIN="${SNI_DOMAIN//$'\r'/}"
+    SNI_DOMAIN="${SNI_DOMAIN//$'\302\240'/ }"
+    SNI_DOMAIN="${SNI_DOMAIN//$'\342\200\213'/}"
+    SNI_DOMAIN="${SNI_DOMAIN//$'\357\273\277'/}"
+    SNI_DOMAIN="${SNI_DOMAIN#"${SNI_DOMAIN%%[![:space:]]*}"}"
+    SNI_DOMAIN="${SNI_DOMAIN%"${SNI_DOMAIN##*[![:space:]]}"}"
+    SNI_DOMAIN="$(printf '%s' "$SNI_DOMAIN" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+    SNI_DOMAIN="${SNI_DOMAIN%.}"
+}
+
 read_inputs() {
     [[ -t 0 ]] || fail 'Запускайте сохранённый файл в терминале: sudo bash vpn-install.sh'
     if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -155,8 +167,7 @@ read_inputs() {
     IFS= read -r -p '  2/3  PublicKey / токен ноды из панели Remnawave: ' NODE_TOKEN || fail 'Ввод прерван.'
     valid_token "$NODE_TOKEN" || fail 'Токен ноды пуст или содержит пробелы/неожиданные символы.'
     IFS= read -r -p '  3/3  Домен для SNI (без https:// и порта): ' SNI_DOMAIN || fail 'Ввод прерван.'
-    SNI_DOMAIN="${SNI_DOMAIN,,}"
-    SNI_DOMAIN="${SNI_DOMAIN%.}"
+    normalize_sni_domain
     valid_domain "$SNI_DOMAIN" || fail 'Нужен полный домен, например node.example.com; для IDN используйте punycode.'
     printf '\n%s✓%s Данные приняты. Дальше вопросов не будет.\n' "$GREEN" "$RESET"
 }
