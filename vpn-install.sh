@@ -42,11 +42,17 @@ GCORE_MODULE='github.com/caddy-dns/gcore@v0.0.0-20250618083722-4ebfce0e46b0'
 REMNA_COMMIT=55495e9783b8388a48e6580ff4c2c26a3eafa08f
 LOG='' TMP_DIR='' BACKUP_DIR='' STAGE='Проверки' PSIPHON_BIND='' UI_FD=2
 GCORE_TOKEN='' NODE_TOKEN='' SNI_DOMAIN=''
+CYAN='' GREEN='' RED='' BOLD='' RESET=''
 
 note() { printf '  %s\n' "$*"; }
-fail() { printf '\nОШИБКА: %s\n' "$*" >&"$UI_FD"; exit 1; }
-stage() { STAGE="$2"; printf '\n[%s/8] %s\n' "$1" "$2"; }
-run() { "$@" </dev/null >> "$LOG" 2>&1; }
+fail() { printf '\n%sОШИБКА%s: %s\n' "$RED" "$RESET" "$*" >&"$UI_FD"; exit 1; }
+stage() {
+    STAGE="$2"
+    printf '\n%s────────────────────────────────────────────────────────%s\n' "$CYAN" "$RESET"
+    printf '%s[%02d/08]%s %s%s%s\n' "$CYAN" "$1" "$RESET" "$BOLD" "$2" "$RESET"
+    printf '%s────────────────────────────────────────────────────────%s\n' "$CYAN" "$RESET"
+}
+run() { "$@" </dev/null; }
 
 on_error() {
     local code="$1" line="$2"
@@ -71,7 +77,7 @@ backup() {
 }
 
 download() {
-    curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 \
+    curl --fail --progress-bar --show-error --location --retry 3 --connect-timeout 15 \
         --max-time 300 --proto '=https' --proto-redir '=https' "$1" -o "$2"
 }
 
@@ -137,18 +143,24 @@ valid_domain() {
 
 read_inputs() {
     [[ -t 0 ]] || fail 'Запускайте сохранённый файл в терминале: sudo bash vpn-install.sh'
-    printf '\nVPN NODE · Remnanode 2.8.0 + Caddy/Gcore + Psiphon + WARP\n\n'
-    IFS= read -r -s -p '1/3 · Gcore API token: ' GCORE_TOKEN || fail 'Ввод прерван.'
-    printf '\n'
+    if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+        CYAN=$'\033[36m' GREEN=$'\033[32m' RED=$'\033[31m'
+        BOLD=$'\033[1m' RESET=$'\033[0m'
+    fi
+    printf '\n%s╭──────────────────────────────────────────────────────╮%s\n' "$CYAN" "$RESET"
+    printf '%s│%s  %sVPN NODE%s                                            %s│%s\n' "$CYAN" "$RESET" "$BOLD" "$RESET" "$CYAN" "$RESET"
+    printf '%s│%s  Remnanode 2.8.0 · Caddy/Gcore · Psiphon · WARP      %s│%s\n' "$CYAN" "$RESET" "$CYAN" "$RESET"
+    printf '%s╰──────────────────────────────────────────────────────╯%s\n\n' "$CYAN" "$RESET"
+    printf 'Введите три параметра и нажмите Enter после каждого.\n\n'
+    IFS= read -r -p '  1/3  Gcore API token: ' GCORE_TOKEN || fail 'Ввод прерван.'
     valid_token "$GCORE_TOKEN" || fail 'Gcore token пуст или содержит пробелы/неожиданные символы.'
-    IFS= read -r -s -p '2/3 · PublicKey / токен ноды из панели Remnawave: ' NODE_TOKEN || fail 'Ввод прерван.'
-    printf '\n'
+    IFS= read -r -p '  2/3  PublicKey / токен ноды из панели Remnawave: ' NODE_TOKEN || fail 'Ввод прерван.'
     valid_token "$NODE_TOKEN" || fail 'Токен ноды пуст или содержит пробелы/неожиданные символы.'
-    IFS= read -r -p '3/3 · Домен для SNI (без https:// и порта): ' SNI_DOMAIN || fail 'Ввод прерван.'
+    IFS= read -r -p '  3/3  Домен для SNI (без https:// и порта): ' SNI_DOMAIN || fail 'Ввод прерван.'
     SNI_DOMAIN="${SNI_DOMAIN,,}"
     SNI_DOMAIN="${SNI_DOMAIN%.}"
     valid_domain "$SNI_DOMAIN" || fail 'Нужен полный домен, например node.example.com; для IDN используйте punycode.'
-    note 'Данные приняты. Дальше вопросов не будет.'
+    printf '\n%s✓%s Данные приняты. Дальше вопросов не будет.\n' "$GREEN" "$RESET"
 }
 
 init_workspace() {
@@ -163,7 +175,7 @@ init_workspace() {
     # /opt is normally executable, unlike /tmp on hardened servers.
     TMP_DIR="$(mktemp -d /opt/.unified-vpn-build.XXXXXX)"
     printf '%s\n' "$MANAGED_TAG" > "$STATE_DIR/owner"
-    note "Подробный журнал: $LOG"
+    note "Журнал установки: $LOG"
 }
 
 install_dependencies() {
@@ -682,9 +694,9 @@ install_warp() (
         for attempt in 1 2 3; do
             note "Регистрация бесплатного WARP: попытка $attempt/3."
             # Accepting Cloudflare ToS is part of unattended free-account registration.
-            # wgcf output may contain account details; keep it in a root-only file.
-            if timeout 90 "$state/wgcf" register --accept-tos \
-                > "$state/registration.log" 2>&1 </dev/null; then
+            # Show registration output and retain it in a root-only file.
+            if timeout 90 "$state/wgcf" register --accept-tos </dev/null 2>&1 | \
+                tee "$state/registration.log"; then
                 account_ok=1
             fi
             # Registration can save a valid account before a later metadata request fails.
@@ -696,7 +708,7 @@ install_warp() (
     fi
     chmod 0600 wgcf-account.toml
     if ! timeout 90 "$state/wgcf" generate --profile "$tmp/wgcf-profile.conf" \
-        > "$state/generation.log" 2>&1 </dev/null; then
+        </dev/null 2>&1 | tee "$state/generation.log"; then
         fail "Не удалось получить профиль WARP. Аккаунт сохранён. Журнал: $state/generation.log."
     fi
     [[ -s "$tmp/wgcf-profile.conf" ]] || fail 'wgcf не создал профиль WireGuard.'
@@ -909,7 +921,7 @@ verify_caddy() {
         systemctl is-active --quiet caddy || return 1
         if curl --fail --silent --show-error --noproxy '*' \
             --resolve "$SNI_DOMAIN:8443:127.0.0.1" --connect-timeout 2 --max-time 5 \
-            "https://$SNI_DOMAIN:8443/" -o /dev/null >> "$LOG" 2>&1; then
+            "https://$SNI_DOMAIN:8443/" -o /dev/null; then
             return 0
         fi
         sleep 5
@@ -981,7 +993,7 @@ final_checks() {
         note 'ОШИБКА · Psiphon установлен, но запрос через туннель не прошёл.'
         incomplete=1
     fi
-    if verify_warp >> "$LOG" 2>&1; then
+    if verify_warp; then
         note 'OK · WARP подтвердил соединение с Cloudflare через интерфейс warp.'
     else
         note 'ОШИБКА · WARP установлен, но рабочее соединение не подтверждено.'
@@ -1015,7 +1027,7 @@ final_checks() {
         printf '\nУстановка завершена с ошибками проверки; полноценная готовность не подтверждена.\n'
         return 2
     fi
-    printf '\nГОТОВО · Все локальные проверки прошли.\n'
+    printf '\n%s✓ ГОТОВО%s · Все локальные проверки прошли.\n' "$GREEN" "$RESET"
     printf 'Для панели: API 3001; SNI %s; Reality target 127.0.0.1:8443; xver 0.\n' "$SNI_DOMAIN"
     printf 'Подключение панели и работа VPN-клиента этими проверками не проверялись.\n'
 }
@@ -1030,6 +1042,9 @@ main() {
     preflight
     read_inputs
     init_workspace
+    # Show command output live while keeping the root-only installation log.
+    exec > >(tee -a "$LOG") 2>&1
+    UI_FD=2
     stage 1 'Базовые пакеты'
     install_dependencies
     validate_node_token
@@ -1042,9 +1057,9 @@ main() {
     stage 5 'Caddy с Gcore DNS'
     install_caddy
     stage 6 'Psiphon'
-    install_psiphon >> "$LOG" 2>&1
+    install_psiphon
     stage 7 'Бесплатный WARP'
-    install_warp >> "$LOG" 2>&1
+    install_warp
     write_connection_info
     stage 8 'Проверка установки'
     # Only checks (not installation functions) are evaluated in a conditional.
