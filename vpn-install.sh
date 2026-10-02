@@ -2,7 +2,7 @@
 # Unified VPN node installer. Run: sudo bash vpn-install.sh
 # Ubuntu 22.04/24.04, Debian 12/13; systemd; amd64/arm64.
 # Installs Remnanode 2.8.0, Caddy + Gcore DNS, BBR, Psiphon and free WARP.
-# Only three inputs; existing installations from this script can be rerun.
+# Only three inputs; previous VPN components are backed up and reinstalled.
 # Sources inspected 2026-10-01:
 # https://github.com/Capybara-z/RemnaSetup/tree/55495e9783b8388a48e6580ff4c2c26a3eafa08f
 # https://github.com/caddy-dns/gcore
@@ -47,7 +47,7 @@ fail() { printf '\n%sОШИБКА%s: %s\n' "$RED" "$RESET" "$*" >&"$UI_FD"; exit
 stage() {
     STAGE="$2"
     printf '\n%s────────────────────────────────────────────────────────%s\n' "$CYAN" "$RESET"
-    printf '%s[%02d/08]%s %s%s%s\n' "$CYAN" "$1" "$RESET" "$BOLD" "$2" "$RESET"
+    printf '%s[%02d/09]%s %s%s%s\n' "$CYAN" "$1" "$RESET" "$BOLD" "$2" "$RESET"
     printf '%s────────────────────────────────────────────────────────%s\n' "$CYAN" "$RESET"
 }
 run() { "$@" </dev/null; }
@@ -97,37 +97,13 @@ preflight() {
     command -v flock >/dev/null || fail 'Отсутствует flock из util-linux.'
     exec 9>/run/lock/unified-vpn-installer.lock
     flock -n 9 || fail 'Другой экземпляр установщика уже запущен.'
-    local overrides
-    overrides="$(systemctl show caddy.service -p DropInPaths --value 2>/dev/null || true)"
-    [[ -z "$overrides" ]] || fail 'Обнаружены дополнительные настройки caddy.service (drop-in). Нужен отдельный разбор существующей службы.'
-
-    if [[ ! -f "$STATE_DIR/owner" ]] || [[ "$(cat "$STATE_DIR/owner")" != "$MANAGED_TAG" ]]; then
-        command -v caddy >/dev/null && fail 'Caddy уже установлен другим способом; нужен чистый VPS.'
-        [[ -z "$(systemctl show caddy.service -p FragmentPath --value 2>/dev/null || true)" ]] || \
-            fail 'Найдена прежняя служба Caddy; нужен чистый VPS.'
-        local path
-        for path in /etc/caddy/Caddyfile /etc/systemd/system/caddy.service \
-            /opt/remnanode/compose.yaml /opt/remnanode/compose.yml \
-            /opt/remnanode/docker-compose.yaml /opt/remnanode/docker-compose.yml \
-            /etc/wireguard/warp.conf /etc/default/ghost-warp /etc/default/ghost-psiphon \
-            /var/www/site/index.html; do
-            [[ ! -e "$path" ]] || fail "Найдена прежняя установка: $path. Нужен чистый VPS или повторный запуск именно этого установщика."
-        done
-        if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
-            if docker container inspect remnanode >/dev/null 2>&1; then
-                fail 'Контейнер remnanode уже существует и создан другим установщиком.'
-            fi
-        fi
-        local port
-        for port in 80 8443 3001 2019; do
-            if command -v ss >/dev/null && [[ -n "$(ss -H -ltn "sport = :$port")" ]]; then
-                fail "Порт $port уже занят. Установка остановлена до изменений."
-            fi
-        done
-    fi
 }
 
 valid_token() { [[ -n "$1" && "$1" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; }
+valid_gcore_token() {
+    local pattern='^[A-Za-z0-9._~+/$=-]+$'
+    [[ -n "$1" && "$1" =~ $pattern ]]
+}
 valid_domain() {
     local domain="$1" label
     [[ ${#domain} -le 253 && "$domain" == *.* && "$domain" != *..* ]] || return 1
@@ -153,6 +129,12 @@ normalize_sni_domain() {
 
 read_inputs() {
     [[ -t 0 ]] || fail 'Запускайте сохранённый файл в терминале: sudo bash vpn-install.sh'
+    # Readline handles editing keys and long pasted node tokens independently
+    # of the terminal's erase setting and canonical input buffer limit.
+    set -o emacs
+    bind -m emacs-standard '"\C-h": backward-delete-char'
+    bind -m emacs-standard '"\C-?": backward-delete-char'
+    bind -m emacs-standard '"\e[3~": delete-char'
     if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
         CYAN=$'\033[36m' GREEN=$'\033[32m' RED=$'\033[31m'
         BOLD=$'\033[1m' RESET=$'\033[0m'
@@ -162,13 +144,22 @@ read_inputs() {
     printf '%s│%s  Remnanode 2.8.0 · Caddy/Gcore · Psiphon · WARP      %s│%s\n' "$CYAN" "$RESET" "$CYAN" "$RESET"
     printf '%s╰──────────────────────────────────────────────────────╯%s\n\n' "$CYAN" "$RESET"
     printf 'Введите три параметра и нажмите Enter после каждого.\n\n'
-    IFS= read -r -p '  1/3  Gcore API token: ' GCORE_TOKEN || fail 'Ввод прерван.'
-    valid_token "$GCORE_TOKEN" || fail 'Gcore token пуст или содержит пробелы/неожиданные символы.'
-    IFS= read -r -p '  2/3  PublicKey / токен ноды из панели Remnawave: ' NODE_TOKEN || fail 'Ввод прерван.'
-    valid_token "$NODE_TOKEN" || fail 'Токен ноды пуст или содержит пробелы/неожиданные символы.'
-    IFS= read -r -p '  3/3  Домен для SNI (без https:// и порта): ' SNI_DOMAIN || fail 'Ввод прерван.'
-    normalize_sni_domain
-    valid_domain "$SNI_DOMAIN" || fail 'Нужен полный домен, например node.example.com; для IDN используйте punycode.'
+    while true; do
+        IFS= read -e -r -p '  1/3  Gcore API token: ' GCORE_TOKEN || fail 'Ввод прерван.'
+        valid_gcore_token "$GCORE_TOKEN" && break
+        note 'Токен пуст или содержит пробелы/неподходящие символы. Введите Gcore token ещё раз.'
+    done
+    while true; do
+        IFS= read -e -r -p '  2/3  PublicKey / токен ноды из панели Remnawave: ' NODE_TOKEN || fail 'Ввод прерван.'
+        valid_token "$NODE_TOKEN" && break
+        note 'Токен пуст или содержит пробелы/неподходящие символы. Введите токен ноды ещё раз.'
+    done
+    while true; do
+        IFS= read -e -r -p '  3/3  Домен для SNI (без https:// и порта): ' SNI_DOMAIN || fail 'Ввод прерван.'
+        normalize_sni_domain
+        valid_domain "$SNI_DOMAIN" && break
+        note 'Введите домен ещё раз, например node.example.com; для IDN используйте punycode.'
+    done
     printf '\n%s✓%s Данные приняты. Дальше вопросов не будет.\n' "$GREEN" "$RESET"
 }
 
@@ -233,10 +224,76 @@ EOF
     run systemctl enable --now docker
     run docker info
     docker compose version >/dev/null 2>&1 || fail 'Установленный Docker не содержит docker compose. Установите Compose plugin и повторите запуск.'
-    if docker container inspect remnanode >/dev/null 2>&1; then
-        [[ "$(docker inspect -f '{{index .Config.Labels "io.unified-vpn-installer.managed"}}' remnanode)" == true ]] || \
-            fail 'Существующий remnanode создан другим установщиком; контейнер не изменён.'
+}
+
+remove_previous_installation() {
+    local path unit state container port
+    # Explicit names only: no Docker prune, volume removal or Compose teardown.
+    local -a units=(ghost-psiphon-watchdog.timer ghost-warp-watchdog.timer
+        vpn-warp-watchdog.timer ghost-psiphon-watchdog.service
+        ghost-warp-watchdog.service vpn-warp-watchdog.service
+        ghost-psiphon.service wg-quick@warp.service caddy.service caddy-api.service)
+    local -a paths=(/opt/remnanode /etc/logrotate.d/remnanode
+        /etc/caddy /var/lib/caddy /var/www/site /usr/bin/caddy /usr/local/bin/caddy
+        /etc/apt/sources.list.d/caddy-stable.list /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        /opt/ghost-psiphon /etc/default/ghost-psiphon
+        /usr/local/sbin/ghost-psiphon-run /usr/local/sbin/ghost-psiphon-watchdog
+        /usr/local/bin/ghost-psiphon /var/lib/ghost-psiphon-watchdog.state
+        /opt/ghost-warp /opt/vpn-setup/warp /opt/warp-native
+        /etc/default/ghost-warp /usr/local/bin/ghost-warp /usr/local/bin/wgcf
+        /usr/local/sbin/ghost-warp-watchdog /usr/local/sbin/vpn-warp-check
+        /etc/wireguard/warp.conf /etc/cron.d/warp-native
+        "$STATE_DIR/connection-info.txt" "$STATE_DIR/outbounds.json")
+    for unit in "${units[@]}"; do
+        paths+=("/etc/systemd/system/$unit" "/etc/systemd/system/$unit.d")
+    done
+    note "Сохраняю прежние файлы установки: $BACKUP_DIR"
+    for path in "${paths[@]}"; do backup "$path"; done
+
+    note 'Останавливаю прежние службы и удаляю старую установку VPN.'
+    rm -f -- /etc/cron.d/warp-native
+    for unit in "${units[@]}"; do
+        state="$(systemctl show "$unit" -p LoadState --value)"
+        if [[ -n "$state" && "$state" != not-found ]]; then
+            if ! run systemctl stop "$unit"; then
+                state="$(systemctl show "$unit" -p MainPID --value)"
+                if [[ -n "$state" && "$state" != 0 ]] || systemctl is-active --quiet "$unit"; then
+                    fail "Не удалось остановить $unit; прежние файлы сохранены в $BACKUP_DIR."
+                fi
+                note "$unit уже не работает; удаляю остатки прежней установки."
+            fi
+            # Static/linked units may not have an [Install] section.
+            systemctl disable "$unit" || true
+        fi
+    done
+    if ip link show warp >/dev/null 2>&1; then
+        if [[ -f /etc/wireguard/warp.conf ]]; then
+            if ! run wg-quick down warp; then
+                note 'Старая конфигурация WARP повреждена; удаляю оставшийся интерфейс.'
+            fi
+        fi
+        if ip link show warp >/dev/null 2>&1; then
+            run ip link delete dev warp
+        fi
     fi
+    for container in remnanode ghost-psiphon; do
+        if docker container inspect "$container" >/dev/null 2>&1; then
+            run docker rm -f "$container"
+        fi
+    done
+    # Remove the old distribution package before installing our Gcore build.
+    if dpkg-query -W -f='${Status}' caddy 2>/dev/null | grep -Fxq 'install ok installed'; then
+        run apt-get -o DPkg::Lock::Timeout=180 purge -y caddy
+    fi
+    rm -rf -- "${paths[@]}"
+    rm -rf -- /var/log/remnanode /var/log/ghost-psiphon-watchdog.log \
+        /var/log/ghost-warp-watchdog.log /run/ghost-warp
+    run systemctl daemon-reload
+    for port in 80 8443 3001 2019 1080 8080; do
+        [[ -z "$(ss -H -ltn "sport = :$port")" ]] || \
+            fail "После удаления прежней VPN-установки порт $port занят другим процессом. Освободите его и запустите скрипт снова."
+    done
+    note 'Прежняя установка удалена. Начинаю установку заново.'
 }
 
 install_bbr() {
@@ -1087,18 +1144,20 @@ main() {
     validate_node_token
     stage 2 'Docker и Compose'
     install_docker
-    stage 3 'BBR'
+    stage 3 'Удаление прежней установки'
+    remove_previous_installation
+    stage 4 'BBR'
     install_bbr
-    stage 4 'Remnanode 2.8.0'
+    stage 5 'Remnanode 2.8.0'
     install_node
-    stage 5 'Caddy с Gcore DNS'
+    stage 6 'Caddy с Gcore DNS'
     install_caddy
-    stage 6 'Psiphon'
+    stage 7 'Psiphon'
     install_psiphon
-    stage 7 'Бесплатный WARP'
+    stage 8 'Бесплатный WARP'
     install_warp
     write_connection_info
-    stage 8 'Проверка установки'
+    stage 9 'Проверка установки'
     # Only checks (not installation functions) are evaluated in a conditional.
     local result=0
     final_checks || result=$?
