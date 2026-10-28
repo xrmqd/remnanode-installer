@@ -24,8 +24,8 @@ sudo bash vpn-install.sh --repair
 All Xray profiles and routing changes belong in Remnawave. The installer never calls Xray's runtime routing API.
 
 - Disable the affected location's hosts before maintenance; handle locations sequentially.
-- Preserve each profile's existing inbound tags, REALITY keys and short IDs.
-- Match the Host SNI override, REALITY `serverNames` and Caddy certificate domain. Use target `127.0.0.1:8443`, `xver: 0`.
+- Preserve each profile's existing inbound tags, REALITY keys, short IDs and working transport. A US RAW/Vision result does not justify replacing a working gRPC transport on another location without checking its actual clients.
+- Match the Host SNI override, REALITY `serverNames` and Caddy certificate domain. For a fresh installation use target `127.0.0.1:8443`, `xver: 0`. Preserve an existing working fallback port (for example 9443 with Docker Caddy).
 - The Host fingerprint override `firefox` fixed Happ connections over the tested mobile network on the US node; validate the exported client profile on each location.
 - Psiphon is a TCP-only SOCKS outbound. Keep `network: "tcp"` on its routing rule.
 - Gemini worked on the US node through `DIRECT` with IPv4. Do not copy a US location/region assumption to another exit without a traffic check.
