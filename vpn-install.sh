@@ -352,8 +352,35 @@ install_node() {
 }
 EOF
     chmod 0644 /etc/logrotate.d/remnanode
+    install_log_rotation_timer
     run docker compose -p remnanode -f /opt/remnanode/docker-compose.yml up -d remnanode
     unset NODE_TOKEN
+}
+
+install_log_rotation_timer() {
+    local name
+    for name in vpn-node-logrotate.service vpn-node-logrotate.timer; do
+        backup "/etc/systemd/system/$name"
+    done
+    cat > /etc/systemd/system/vpn-node-logrotate.service <<'SERVICE'
+[Unit]
+Description=Rotate VPN node logs
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/logrotate /etc/logrotate.d/remnanode
+SERVICE
+    cat > /etc/systemd/system/vpn-node-logrotate.timer <<'TIMER'
+[Unit]
+Description=Check VPN logs hourly
+[Timer]
+OnCalendar=hourly
+Persistent=true
+[Install]
+WantedBy=timers.target
+TIMER
+    chmod 0644 /etc/systemd/system/vpn-node-logrotate.{service,timer}
+    run systemctl daemon-reload
+    run systemctl enable --now vpn-node-logrotate.timer
 }
 
 write_caddyfile() {

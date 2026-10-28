@@ -36,3 +36,5 @@ Caddy and API readiness do not establish that a client connection works. Do not 
 ## Caddy repair rollback
 
 Remove the added `/etc/systemd/system/caddy.service.d/zz-unified-vpn-reliability.conf` drop-in, run `systemctl daemon-reload`, and restart Caddy to return to the preceding unit settings. Retain the backup before other changes. The normal install and `--repair` do not alter DNS records.
+
+Node access logs rotate at 50 MiB, with compressed history and an hourly check to prevent disk exhaustion on small VPSs. Existing large logs should be archived before truncation; the installer does not delete them during repair.
