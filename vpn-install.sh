@@ -2,7 +2,8 @@
 # Unified VPN node installer. Run: sudo bash vpn-install.sh
 # Ubuntu 22.04/24.04, Debian 12/13; systemd; amd64/arm64.
 # Installs Remnanode 2.8.0, Caddy + Gcore DNS, BBR, Psiphon and free WARP.
-# Only three inputs; previous VPN components are backed up and reinstalled.
+# Fresh install: three inputs. Existing installs: --repair / --check.
+# Destructive reinstall requires the explicit --reinstall option.
 # Sources inspected 2026-10-01:
 # https://github.com/Capybara-z/RemnaSetup/tree/55495e9783b8388a48e6580ff4c2c26a3eafa08f
 # https://github.com/caddy-dns/gcore
@@ -38,7 +39,7 @@ STATE_DIR=/var/lib/unified-vpn-installer
 NODE_IMAGE=remnawave/node:2.8.0
 MIN_GO_VERSION=1.25
 REMNA_COMMIT=55495e9783b8388a48e6580ff4c2c26a3eafa08f
-LOG='' TMP_DIR='' BACKUP_DIR='' STAGE='Проверки' PSIPHON_BIND='' UI_FD=2
+LOG='' TMP_DIR='' BACKUP_DIR='' STAGE='Проверки' PSIPHON_BIND='' UI_FD=2 MODE=install
 GCORE_TOKEN='' NODE_TOKEN='' SNI_DOMAIN=''
 CYAN='' GREEN='' RED='' BOLD='' RESET=''
 
@@ -145,12 +146,14 @@ read_inputs() {
     printf '%s╰──────────────────────────────────────────────────────╯%s\n\n' "$CYAN" "$RESET"
     printf 'Введите три параметра и нажмите Enter после каждого.\n\n'
     while true; do
-        IFS= read -e -r -p '  1/3  Gcore API token: ' GCORE_TOKEN || fail 'Ввод прерван.'
+        IFS= read -e -s -r -p '  1/3  Gcore API token: ' GCORE_TOKEN || fail 'Ввод прерван.'
+        printf '\n'
         valid_gcore_token "$GCORE_TOKEN" && break
         note 'Токен пуст или содержит пробелы/неподходящие символы. Введите Gcore token ещё раз.'
     done
     while true; do
-        IFS= read -e -r -p '  2/3  PublicKey / токен ноды из панели Remnawave: ' NODE_TOKEN || fail 'Ввод прерван.'
+        IFS= read -e -s -r -p '  2/3  PublicKey / токен ноды из панели Remnawave: ' NODE_TOKEN || fail 'Ввод прерван.'
+        printf '\n'
         valid_token "$NODE_TOKEN" && break
         note 'Токен пуст или содержит пробелы/неподходящие символы. Введите токен ноды ещё раз.'
     done
@@ -458,6 +461,7 @@ ExecStart=/usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --force
 Restart=on-failure
 RestartSec=5s
+TimeoutStartSec=300s
 TimeoutStopSec=10s
 LimitNOFILE=1048576
 PrivateTmp=true
@@ -1048,6 +1052,8 @@ SNI: $SNI_DOMAIN
 Reality target: 127.0.0.1:8443
 Reality serverNames: ["$SNI_DOMAIN"]
 Reality xver: 0
+Host SNI override: $SNI_DOMAIN (must match Reality serverNames and Caddy certificate)
+Host fingerprint override: firefox (verified with Happ on mobile networks)
 Psiphon SOCKS: $PSIPHON_BIND:1080
 Psiphon HTTP: $PSIPHON_BIND:8080
 Psiphon поддерживает TCP; UDP-трафик в psiphon-out не направлять.
@@ -1060,6 +1066,12 @@ Node credentials: /opt/remnanode/docker-compose.yml (root:root, 0600)
 в панели Remnawave. Файл outbounds.json содержит примеры добавляемых outbound,
 а не замену всего Config Profile. Caddy занимает 8443 и стандартный HTTP 80;
 443 остаётся для Xray. Firewall и правила провайдера скрипт не меняет.
+
+Маршрутизация Google/Gemini настраивается только в Config Profile панели.
+На ноде США подтверждён DIRECT с ForceIPv4; не направляйте Gemini в Psiphon
+без отдельной проверки страны выхода. Для других локаций проверяйте доступ
+отдельно. Установщик не изменяет runtime-правила Xray и не выдаёт проверку
+локальных служб за успешное подключение клиента.
 
 Диагностика:
   systemctl status caddy ghost-psiphon wg-quick@warp --no-pager
@@ -1126,6 +1138,58 @@ final_checks() {
     printf 'Подключение панели и работа VPN-клиента этими проверками не проверялись.\n'
 }
 
+parse_mode() {
+    case "${1:-}" in
+        '') MODE=install ;;
+        --repair) MODE=repair ;;
+        --check) MODE=check ;;
+        --reinstall) MODE=reinstall ;;
+        *) fail 'Использование: bash vpn-install.sh [--repair|--check|--reinstall]' ;;
+    esac
+    [[ $# -le 1 ]] || fail 'Допустим только один режим.'
+}
+
+existing_parameters() {
+    [[ -f /etc/caddy/Caddyfile && -x /usr/bin/caddy ]] || fail 'Caddy не установлен; нужен обычный режим установки.'
+    SNI_DOMAIN="$(python3 - <<'PY'
+import pathlib,re,sys
+text=pathlib.Path('/etc/caddy/Caddyfile').read_text()
+domains=re.findall(r'^\s*([a-zA-Z0-9.-]+):8443\s*\{',text,re.M)
+if len(set(domains))!=1:
+    sys.exit('Нужен единственный домен :8443 в /etc/caddy/Caddyfile; файл не изменён.')
+print(domains[0].lower())
+PY
+)"
+    valid_domain "$SNI_DOMAIN" || fail 'Не удалось определить SNI из Caddyfile.'
+    PSIPHON_BIND="$(sed -n 's/^BIND=//p' /etc/default/ghost-psiphon 2>/dev/null || true)"
+    [[ "$PSIPHON_BIND" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || PSIPHON_BIND=127.0.0.1
+}
+
+repair_existing() {
+    # Repair the demonstrated US failure without removing software, keys,
+    # certificates, client lists, Docker containers or panel-managed profiles.
+    local dropin=/etc/systemd/system/caddy.service.d/zz-unified-vpn-reliability.conf
+    backup /etc/systemd/system/caddy.service
+    backup /etc/systemd/system/caddy.service.d
+    install -d -m 0755 /etc/systemd/system/caddy.service.d
+    cat > "$dropin" <<'SERVICE'
+# Managed by vpn-install.sh. Do not add --environ: it logs DNS credentials.
+[Service]
+ExecStart=
+ExecStart=/usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=300s
+SERVICE
+    chmod 0644 "$dropin"
+    run systemctl daemon-reload
+    run systemctl enable caddy
+    run systemctl restart caddy
+    verify_caddy || fail 'Caddy не прошёл HTTPS-проверку; резервная копия unit сохранена.'
+    note "Caddy восстановлен: доверенный HTTPS для $SNI_DOMAIN; автозапуск и повторный запуск включены."
+    note 'Профиль и хост Remnawave не изменялись. Проверьте SNI, firefox и реальный клиент.'
+}
+
 main() {
     exec 3>&2
     UI_FD=3
@@ -1133,7 +1197,23 @@ main() {
     trap cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    parse_mode "$@"
     preflight
+    if [[ "$MODE" == repair || "$MODE" == check ]]; then
+        existing_parameters
+        if [[ "$MODE" == check ]]; then
+            final_checks
+            return
+        fi
+        init_workspace
+        exec > >(tee -a "$LOG") 2>&1
+        UI_FD=2
+        repair_existing
+        return
+    fi
+    if [[ "$MODE" == install && ( -e /opt/remnanode/docker-compose.yml || -e /etc/caddy/Caddyfile ) ]]; then
+        fail 'Обнаружена существующая установка. Используйте --repair; полная переустановка только с --reinstall.'
+    fi
     read_inputs
     init_workspace
     # Show command output live while keeping the root-only installation log.
@@ -1144,8 +1224,14 @@ main() {
     validate_node_token
     stage 2 'Docker и Compose'
     install_docker
-    stage 3 'Удаление прежней установки'
-    remove_previous_installation
+    stage 3 'Подготовка установки'
+    if [[ "$MODE" == reinstall ]]; then
+        remove_previous_installation
+    else
+        for port in 80 8443 3001 2019 1080 8080; do
+            [[ -z "$(ss -H -ltn "sport = :$port")" ]] || fail "Порт $port уже занят; нужна проверка существующей установки."
+        done
+    fi
     stage 4 'BBR'
     install_bbr
     stage 5 'Remnanode 2.8.0'
