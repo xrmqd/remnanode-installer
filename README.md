@@ -6,6 +6,8 @@ Installs Remnanode 2.8.0, Caddy with Gcore DNS-01, Psiphon, native WARP and BBR 
 
 Download `vpn-install.sh`, inspect it, then run `sudo bash vpn-install.sh` in a terminal. Enter the Gcore DNS token, the full node authentication bundle from Remnawave, and the SNI domain. Secret inputs are hidden. DNS must already point to the intended server(s).
 
+When Docker is already installed and Compose is missing, the installer adds the official Compose plugin after verifying its SHA256 checksum. Package installation uses `needrestart` in list-only mode so service restarts can be handled during maintenance.
+
 An existing Remnanode Compose file or Caddyfile stops a normal installation. The script does not change the provider firewall or publish a Remnawave profile.
 
 ## Existing server

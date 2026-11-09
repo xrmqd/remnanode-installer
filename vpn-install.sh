@@ -32,11 +32,12 @@
 set +x
 set -Eeuo pipefail
 umask 077
-export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
 
 MANAGED_TAG='unified-vpn-installer-v1'
 STATE_DIR=/var/lib/unified-vpn-installer
 NODE_IMAGE=remnawave/node:2.8.0
+COMPOSE_VERSION=v5.6.0
 MIN_GO_VERSION=1.25
 REMNA_COMMIT=55495e9783b8388a48e6580ff4c2c26a3eafa08f
 LOG='' TMP_DIR='' BACKUP_DIR='' STAGE='Проверки' PSIPHON_BIND='' UI_FD=2 MODE=install
@@ -226,7 +227,30 @@ EOF
     fi
     run systemctl enable --now docker
     run docker info
-    docker compose version >/dev/null 2>&1 || fail 'Установленный Docker не содержит docker compose. Установите Compose plugin и повторите запуск.'
+    install_compose_plugin
+}
+
+install_compose_plugin() {
+    docker compose version >/dev/null 2>&1 && return 0
+    local machine asset url expected target=/usr/local/lib/docker/cli-plugins/docker-compose
+    [[ ! -e "$target" && ! -L "$target" ]] || fail "Compose не работает, но $target уже существует. Проверьте этот файл перед повторным запуском."
+    machine="$(uname -m)"
+    case "$machine" in
+        x86_64|aarch64) ;;
+        *) fail "Для Compose не поддерживается архитектура $machine." ;;
+    esac
+    asset="docker-compose-linux-$machine"
+    url="https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/$asset"
+    note "Устанавливаю Compose $COMPOSE_VERSION для существующего Docker."
+    run download "$url" "$TMP_DIR/docker-compose"
+    run download "$url.sha256" "$TMP_DIR/docker-compose.sha256"
+    expected="$(awk 'NR == 1 {print $1}' "$TMP_DIR/docker-compose.sha256")"
+    [[ "$expected" =~ ^[[:xdigit:]]{64}$ ]] || fail 'Некорректная контрольная сумма Compose.'
+    printf '%s  %s\n' "$expected" "$TMP_DIR/docker-compose" | sha256sum --check --status \
+        || fail 'SHA256 Compose не совпал с официальным релизом.'
+    run install -d -m 0755 "$(dirname "$target")"
+    run install -m 0755 "$TMP_DIR/docker-compose" "$target"
+    docker compose version >/dev/null 2>&1 || fail 'Установленный Compose не запускается.'
 }
 
 remove_previous_installation() {
